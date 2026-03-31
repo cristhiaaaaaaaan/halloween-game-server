@@ -28,6 +28,9 @@ const MONSTRUOS_BASE = [
   { id: 'm5', nombre: 'La Bruja',   emoji: '🧙', hp_max: 45 },
 ];
 
+// ─── Configuración de turnos ──────────────────────────────────────────────────
+const TURNO_SEGUNDOS = 20; // segundos por turno antes de pasar automáticamente
+
 // ─── Estado del juego ─────────────────────────────────────────────────────────
 let jugadores   = [];   // { id, nombre, hp, puntos, armas: [] }
 let monstruos   = [];   // copia con hp_actual
@@ -35,17 +38,39 @@ let alianzas    = {};   // { alias: [id1, id2, id3] }
 let turnoActual = null;
 let fase        = 'espera';
 let sesionId    = null;
+let turnoTimer  = null; // referencia al setTimeout del turno activo
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /** Reinicia el estado completo del juego */
 function resetEstado() {
+  detenerTemporizador();
   jugadores   = [];
   monstruos   = [];
   alianzas    = {};
   turnoActual = null;
   fase        = 'espera';
   sesionId    = null;
+}
+
+/** Cancela el temporizador de turno activo */
+function detenerTemporizador() {
+  if (turnoTimer) {
+    clearTimeout(turnoTimer);
+    turnoTimer = null;
+  }
+}
+
+/** Inicia el temporizador del turno actual; si expira, pasa al siguiente */
+function iniciarTemporizador(wss) {
+  detenerTemporizador();
+  if (fase !== 'juego') return;
+  turnoTimer = setTimeout(() => {
+    console.log(`⏱️ Turno expirado para ${turnoActual} — pasando al siguiente`);
+    siguienteTurno();
+    broadcast(wss, estadoJuego());
+    iniciarTemporizador(wss); // inicia el temporizador del nuevo turno
+  }, TURNO_SEGUNDOS * 1000);
 }
 
 /** Devuelve el jugador con ese ws como socket */
@@ -93,6 +118,7 @@ function estadoJuego() {
     turno_actual: turnoActual,
     fase,
     alianzas,
+    tiempo_turno: TURNO_SEGUNDOS,
   };
 }
 
@@ -196,7 +222,10 @@ function manejarIniciarJuego(wss) {
     jugadores:    jugadores.map(limpiarJugador),
     monstruos,
     turno_actual: turnoActual,
+    tiempo_turno: TURNO_SEGUNDOS,
   });
+
+  iniciarTemporizador(wss);
 }
 
 function manejarAlianza(wss, socket, data) {
@@ -284,6 +313,7 @@ async function manejarAtacar(wss, socket, data) {
   // Avanzar turno y enviar estado
   siguienteTurno();
   broadcast(wss, estadoJuego());
+  iniciarTemporizador(wss);
 }
 
 function manejarIntercambiar(wss, socket, data) {
@@ -338,6 +368,7 @@ function manejarDesconexion(wss, socket) {
   // Si era su turno, avanzar
   if (turnoActual === jugador.id && fase === 'juego') {
     siguienteTurno();
+    iniciarTemporizador(wss);
   }
 
   broadcast(wss, estadoJuego());
