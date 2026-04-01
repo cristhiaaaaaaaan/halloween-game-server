@@ -365,6 +365,24 @@ function manejarDesconexion(wss, socket) {
     return;
   }
 
+  // Si queda solo 1 jugador durante una partida, ese jugador gana
+  if (fase === 'juego' && jugadores.length === 1) {
+    detenerTemporizador();
+    fase = 'fin';
+    const ganador = jugadores[0].nombre;
+    registrarSesion('fin', {
+      ganador,
+      jugadores: jugadores.map(j => ({ nombre: j.nombre, puntos: j.puntos })),
+    });
+    broadcast(wss, {
+      tipo:      'fin_juego',
+      ganador,
+      jugadores: jugadores.map(limpiarJugador),
+    });
+    console.log(`🏆 ${ganador} gana por abandono del rival`);
+    return;
+  }
+
   // Si era su turno, avanzar
   if (turnoActual === jugador.id && fase === 'juego') {
     siguienteTurno();
