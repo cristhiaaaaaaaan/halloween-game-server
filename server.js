@@ -60,22 +60,26 @@ const MONSTRUOS_BASE = [
 ];
 
 // ─── Configuración de turnos ──────────────────────────────────────────────────
-const TURNO_SEGUNDOS = 20; // segundos por turno antes de pasar automáticamente
+const TURNO_SEGUNDOS  = 20; // segundos por turno antes de pasar automáticamente
+const GRACIA_SEGUNDOS = 15; // segundos de espera antes de eliminar a un jugador desconectado
 
 // ─── Estado del juego ─────────────────────────────────────────────────────────
-let jugadores   = [];   // { id, nombre, hp, puntos, armas: [] }
-let monstruos   = [];   // copia con hp_actual
-let alianzas    = {};   // { alias: [id1, id2, id3] }
-let turnoActual = null;
-let fase        = 'espera';
-let sesionId    = null;
-let turnoTimer  = null; // referencia al setTimeout del turno activo
+let jugadores    = [];   // { id, nombre, hp, puntos, armas: [] }
+let monstruos    = [];   // copia con hp_actual
+let alianzas     = {};   // { alias: [id1, id2, id3] }
+let turnoActual  = null;
+let fase         = 'espera';
+let sesionId     = null;
+let turnoTimer   = null; // referencia al setTimeout del turno activo
+let graciaTimers = {};   // { jugadorId: timeoutId } — timers de reconexión pendientes
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /** Reinicia el estado completo del juego */
 function resetEstado() {
   detenerTemporizador();
+  Object.values(graciaTimers).forEach(t => clearTimeout(t));
+  graciaTimers = {};
   jugadores   = [];
   monstruos   = [];
   alianzas    = {};
@@ -207,7 +211,36 @@ async function registrarSesion(evento, extra = {}) {
 // ─── Lógica de mensajes ───────────────────────────────────────────────────────
 
 function manejarUnirse(wss, socket, data) {
-  // ID basado en contador simple (Railway no expone ip:port del cliente fácilmente)
+  // Reconexión: si hay una partida activa y el jugador (por nombre) tiene timer de gracia pendiente
+  const reconectado = fase === 'juego'
+    ? jugadores.find(j => j.nombre === data.nombre && !j._socket)
+    : null;
+
+  if (reconectado) {
+    // Cancelar el timer de gracia y restaurar el socket
+    clearTimeout(graciaTimers[reconectado.id]);
+    delete graciaTimers[reconectado.id];
+    reconectado._socket = socket;
+
+    console.log(`🔁 ${reconectado.nombre} reconectó`);
+
+    // Enviarle el estado actual completo para que se sincronice
+    socket.send(JSON.stringify({
+      tipo:      'jugador_unido',
+      jugador:   limpiarJugador(reconectado),
+      jugadores: jugadores.map(limpiarJugador),
+    }));
+    socket.send(JSON.stringify({
+      ...estadoJuego(),
+      tipo: 'juego_iniciado',
+      tiempo_turno: TURNO_SEGUNDOS,
+    }));
+
+    broadcast(wss, { tipo: 'jugador_reconectado', nombre: reconectado.nombre });
+    return;
+  }
+
+  // Nuevo jugador
   const id = `j${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   const jugador = {
     id,
@@ -388,45 +421,70 @@ function manejarIntercambiar(wss, socket, data) {
   });
 }
 
+/**
+ * Maneja la desconexión de un jugador.
+ * Si la partida está en curso, espera GRACIA_SEGUNDOS antes de eliminarlo,
+ * por si la app vuelve al frente y reconecta (ej. minimizar en Android).
+ * Si no reconecta en ese tiempo, se aplica la regla normal.
+ */
 function manejarDesconexion(wss, socket) {
   const jugador = jugadorDeSocket(socket);
   if (!jugador) return;
 
-  jugadores = jugadores.filter(j => j.id !== jugador.id);
-  console.log(`👋 ${jugador.nombre} desconectado. Jugadores: ${jugadores.length}`);
+  // Desasociar el socket pero mantener al jugador en la lista
+  jugador._socket = null;
+  console.log(`📵 ${jugador.nombre} desconectado. Esperando reconexión (${GRACIA_SEGUNDOS}s)...`);
 
-  // Si no quedan jugadores, resetear
-  if (jugadores.length === 0) {
-    resetEstado();
-    console.log('🔄 Juego reseteado (sin jugadores)');
-    return;
-  }
+  // Notificar a los demás que está desconectado temporalmente
+  broadcast(wss, {
+    tipo:     'jugador_desconectado',
+    nombre:   jugador.nombre,
+    gracia:   GRACIA_SEGUNDOS,
+  });
 
-  // Si queda solo 1 jugador durante una partida, ese jugador gana
-  if (fase === 'juego' && jugadores.length === 1) {
-    detenerTemporizador();
-    fase = 'fin';
-    const ganador = jugadores[0].nombre;
-    registrarSesion('fin', {
-      ganador,
-      jugadores: jugadores.map(j => ({ nombre: j.nombre, puntos: j.puntos })),
-    });
-    broadcast(wss, {
-      tipo:      'fin_juego',
-      ganador,
-      jugadores: jugadores.map(limpiarJugador),
-    });
-    console.log(`🏆 ${ganador} gana por abandono del rival`);
-    return;
-  }
-
-  // Si era su turno, avanzar
+  // Si era su turno, avanzar para no bloquear la partida
   if (turnoActual === jugador.id && fase === 'juego') {
     siguienteTurno();
+    broadcast(wss, estadoJuego());
     iniciarTemporizador(wss);
   }
 
-  broadcast(wss, estadoJuego());
+  // Timer de gracia: si no reconecta, eliminar definitivamente
+  graciaTimers[jugador.id] = setTimeout(() => {
+    delete graciaTimers[jugador.id];
+
+    // Verificar que sigue sin socket (no reconectó)
+    const aun = jugadores.find(j => j.id === jugador.id);
+    if (!aun || aun._socket) return; // ya reconectó, no hacer nada
+
+    jugadores = jugadores.filter(j => j.id !== jugador.id);
+    console.log(`👋 ${jugador.nombre} eliminado por no reconectar. Jugadores: ${jugadores.length}`);
+
+    if (jugadores.length === 0) {
+      resetEstado();
+      console.log('🔄 Juego reseteado (sin jugadores)');
+      return;
+    }
+
+    if (fase === 'juego' && jugadores.length === 1) {
+      detenerTemporizador();
+      fase = 'fin';
+      const ganador = jugadores[0].nombre;
+      registrarSesion('fin', {
+        ganador,
+        jugadores: jugadores.map(j => ({ nombre: j.nombre, puntos: j.puntos })),
+      });
+      broadcast(wss, {
+        tipo:      'fin_juego',
+        ganador,
+        jugadores: jugadores.map(limpiarJugador),
+      });
+      console.log(`🏆 ${ganador} gana por abandono del rival`);
+      return;
+    }
+
+    broadcast(wss, estadoJuego());
+  }, GRACIA_SEGUNDOS * 1000);
 }
 
 // ─── Arranque ─────────────────────────────────────────────────────────────────
