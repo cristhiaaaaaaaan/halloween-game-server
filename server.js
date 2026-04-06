@@ -2,6 +2,23 @@
  * Halloween Game - Backend WebSocket + MongoDB
  * Reemplaza el servidor Rust para cloud hosting (Railway)
  * Compatible con el protocolo existente del frontend React Native
+ *
+ * Protocolo de mensajes (cliente → servidor):
+ *   unirse          { tipo, nombre }
+ *   iniciar_juego   { tipo }
+ *   alianza         { tipo, alias, miembros }
+ *   atacar          { tipo, monstruo_id, arma }
+ *   intercambiar    { tipo, para, cantidad }
+ *
+ * Protocolo de mensajes (servidor → cliente):
+ *   jugador_unido   { tipo, jugador, jugadores }
+ *   juego_iniciado  { tipo, jugadores, monstruos, turno_actual, tiempo_turno }
+ *   alianza_formada { tipo, alianzas }
+ *   ataque          { tipo, monstruo, atacante, arma, dano, dano_base, critico, hp_restante }
+ *   monstruo_eliminado { tipo, monstruo, eliminado_por, puntos_ganados }
+ *   fin_juego       { tipo, ganador, jugadores }
+ *   intercambio     { tipo, exitoso, jugadores }
+ *   estado_juego    { tipo, jugadores, monstruos, turno_actual, fase, alianzas, tiempo_turno }
  */
 
 const { WebSocketServer } = require('ws');
@@ -12,20 +29,34 @@ const PORT       = process.env.PORT || 5000;
 const MONGO_URI  = process.env.MONGO_URI || 'mongodb://localhost:27017';
 const DB_NAME    = 'halloween_game';
 
-// ─── Armas disponibles y su daño ─────────────────────────────────────────────
+// ─── Armas disponibles y su daño base ────────────────────────────────────────
 const ARMAS = {
   daga:     3,
   granada:  8,
   dinamita: 15,
 };
 
+/**
+ * Calcula el daño final de un arma aplicando variación aleatoria ±20%.
+ * @param {number} danoBase - Daño base del arma
+ * @returns {{ danoFinal: number, critico: boolean }} Daño calculado e indicador de crítico
+ */
+function calcularDano(danoBase) {
+  // Variación aleatoria entre -20% y +20%
+  const variacion = 1 + (Math.random() * 0.4 - 0.2); // 0.80 a 1.20
+  const danoFinal = Math.max(1, Math.round(danoBase * variacion));
+  const critico   = variacion >= 1.15; // 15%+ se considera golpe crítico
+  return { danoFinal, critico };
+}
+
 // ─── Monstruos iniciales ──────────────────────────────────────────────────────
+// HP reducido para partidas más ágiles (~3-4 ataques por monstruo con dinamita)
 const MONSTRUOS_BASE = [
-  { id: 'm1', nombre: 'Drácula',    emoji: '🧛', hp_max: 50 },
-  { id: 'm2', nombre: 'Frankenstein',emoji: '🧟', hp_max: 70 },
-  { id: 'm3', nombre: 'La Momia',   emoji: '🏺', hp_max: 40 },
-  { id: 'm4', nombre: 'El Fantasma',emoji: '👻', hp_max: 35 },
-  { id: 'm5', nombre: 'La Bruja',   emoji: '🧙', hp_max: 45 },
+  { id: 'm1', nombre: 'Drácula',     emoji: '🧛', hp_max: 30 },
+  { id: 'm2', nombre: 'Frankenstein',emoji: '🧟', hp_max: 40 },
+  { id: 'm3', nombre: 'La Momia',    emoji: '🏺', hp_max: 25 },
+  { id: 'm4', nombre: 'El Fantasma', emoji: '👻', hp_max: 20 },
+  { id: 'm5', nombre: 'La Bruja',    emoji: '🧙', hp_max: 28 },
 ];
 
 // ─── Configuración de turnos ──────────────────────────────────────────────────
@@ -183,7 +214,7 @@ function manejarUnirse(wss, socket, data) {
     nombre: data.nombre,
     hp:     10,
     puntos: 0,
-    armas:  ['daga'],
+    armas:  ['daga', 'granada', 'dinamita'], // todos los jugadores empiezan con las 3 armas
     _socket: socket,
   };
   jugadores.push(jugador);
@@ -243,8 +274,8 @@ async function manejarAtacar(wss, socket, data) {
   if (fase !== 'juego') return;
 
   const arma     = data.arma;
-  const dano     = ARMAS[arma];
-  if (!dano) return;                                    // arma inválida
+  const danoBase = ARMAS[arma];
+  if (!danoBase) return;                                // arma inválida
 
   // Verificar que el jugador tiene esa arma
   if (!jugador.armas.includes(arma)) return;
@@ -252,14 +283,18 @@ async function manejarAtacar(wss, socket, data) {
   const monstruo = monstruos.find(m => m.id === data.monstruo_id && m.hp_actual > 0);
   if (!monstruo) return;
 
-  monstruo.hp_actual = Math.max(0, monstruo.hp_actual - dano);
+  // Aplicar variación aleatoria ±20% al daño base
+  const { danoFinal, critico } = calcularDano(danoBase);
+  monstruo.hp_actual = Math.max(0, monstruo.hp_actual - danoFinal);
 
   broadcast(wss, {
     tipo:        'ataque',
     monstruo:    monstruo.nombre,
     atacante:    jugador.nombre,
     arma,
-    dano,
+    dano:        danoFinal,
+    dano_base:   danoBase,
+    critico,
     hp_restante: monstruo.hp_actual,
   });
 
@@ -267,7 +302,9 @@ async function manejarAtacar(wss, socket, data) {
     jugador_id:  jugador.id,
     monstruo_id: monstruo.id,
     arma,
-    dano,
+    dano_base:   danoBase,
+    dano_final:  danoFinal,
+    critico,
   });
 
   // Monstruo eliminado
@@ -275,8 +312,8 @@ async function manejarAtacar(wss, socket, data) {
     const puntos = Math.floor(monstruo.hp_max / 5);
     jugador.puntos += puntos;
     jugador.hp     += 2;
-    // Dar granada como recompensa (si no la tiene ya)
-    if (!jugador.armas.includes('granada')) jugador.armas.push('granada');
+    // Recompensa por eliminar monstruo: +2 HP y +1 dinamita extra (si no la tiene ya)
+    // Todos ya empiezan con las 3 armas, pero este slot queda para futuras mejoras
 
     broadcast(wss, {
       tipo:          'monstruo_eliminado',
