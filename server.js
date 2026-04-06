@@ -431,7 +431,16 @@ function manejarDesconexion(wss, socket) {
   const jugador = jugadorDeSocket(socket);
   if (!jugador) return;
 
-  // Desasociar el socket pero mantener al jugador en la lista
+  // Si no hay partida en curso, eliminar inmediatamente (lobby o fin)
+  if (fase !== 'juego') {
+    jugadores = jugadores.filter(j => j.id !== jugador.id);
+    console.log(`👋 ${jugador.nombre} salió del lobby.`);
+    if (jugadores.length === 0) resetEstado();
+    else broadcast(wss, estadoJuego());
+    return;
+  }
+
+  // Partida en curso: desasociar el socket pero mantener al jugador en la lista
   jugador._socket = null;
   console.log(`📵 ${jugador.nombre} desconectado. Esperando reconexión (${GRACIA_SEGUNDOS}s)...`);
 
@@ -443,7 +452,7 @@ function manejarDesconexion(wss, socket) {
   });
 
   // Si era su turno, avanzar para no bloquear la partida
-  if (turnoActual === jugador.id && fase === 'juego') {
+  if (turnoActual === jugador.id) {
     siguienteTurno();
     broadcast(wss, estadoJuego());
     iniciarTemporizador(wss);
