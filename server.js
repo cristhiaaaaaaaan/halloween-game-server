@@ -507,6 +507,11 @@ function manejarDesconexion(wss, socket) {
   wss.on('connection', (socket) => {
     console.log('🔌 Nueva conexión');
 
+    // Enviar estado actual inmediatamente (para espectadores web que recargan la página)
+    if (jugadores.length > 0 || fase !== 'espera') {
+      socket.send(JSON.stringify(estadoJuego()));
+    }
+
     socket.on('message', async (raw) => {
       try {
         const data = JSON.parse(raw.toString());
