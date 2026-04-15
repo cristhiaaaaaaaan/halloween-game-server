@@ -278,7 +278,7 @@ async fn log_sesion_fin(db: &MongoDb, sesion_id: &str, ganador: &str, jugadores_
 // WebSocket handshake & frame I/O
 // ─────────────────────────────────────────────
 
-async fn ws_handshake(stream: &mut TcpStream) -> Result<(), Box<dyn std::error::Error>> {
+async fn ws_handshake(stream: &mut TcpStream) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut buf = vec![0u8; 4096];
     let n = stream.read(&mut buf).await?;
     let request = String::from_utf8_lossy(&buf[..n]);
@@ -309,7 +309,7 @@ async fn ws_handshake(stream: &mut TcpStream) -> Result<(), Box<dyn std::error::
 }
 
 /// Read one WebSocket frame. Returns (opcode, payload) or error.
-async fn ws_read_frame<R>(stream: &mut R) -> Result<(u8, Vec<u8>), Box<dyn std::error::Error>>
+async fn ws_read_frame<R>(stream: &mut R) -> Result<(u8, Vec<u8>), Box<dyn std::error::Error + Send + Sync>>
 where
     R: AsyncReadExt + Unpin,
 {
