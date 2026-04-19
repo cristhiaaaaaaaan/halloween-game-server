@@ -438,7 +438,7 @@ async fn handle_message(
                 nombre: nombre.clone(),
                 puntos: 0,
                 hp: 10,
-                armas: vec!["daga".into(), "granada".into(), "dinamita".into()],
+                armas: vec!["daga".into(), "dinamita".into()],
             };
 
             state.jugadores.insert(id.clone(), jugador.clone());
@@ -639,6 +639,16 @@ async fn handle_message(
                 if let Some(j) = state.jugadores.get_mut(&jugador_id) {
                     j.puntos += puntos_ganados;
                     j.hp += 2;
+                    j.armas.push("granada".into());
+                }
+            }
+
+            // Consume weapon after use (daga is infinite, others are single-use)
+            if arma != "daga" {
+                if let Some(j) = state.jugadores.get_mut(&jugador_id) {
+                    if let Some(pos) = j.armas.iter().position(|a| a == &arma) {
+                        j.armas.remove(pos);
+                    }
                 }
             }
 
